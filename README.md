@@ -12,7 +12,7 @@ This project is designed for fresh Windows installations: double-click `download
 - Automatically downloads and updates `aria2c` from the official GitHub Release.
 - Detects system architecture and selects the matching x64 or ARM64 package URL.
 - Downloads modern WSL packages with SHA-256 verification.
-- Supports legacy Store/Appx packages with a clear warning when SHA-256 is unavailable.
+- Supports legacy Store/Appx packages by extracting the rootfs archive from them.
 - Uses aria2's native download progress display.
 - Skips already downloaded modern packages when SHA-256 matches.
 - Cleans temporary files while keeping `tmp\bin\aria2c.exe`.
@@ -36,7 +36,7 @@ The script does not require Git, 7-Zip, tar, or preinstalled aria2.
    - `Space`: select or unselect
    - `Enter`: continue
 4. Select modern WSL distributions first.
-5. Optionally select legacy Store/Appx packages on the second page.
+5. Optionally select legacy Store/Appx packages on the second page. These are extracted to rootfs archives.
 6. Downloaded files are saved to `dist`.
 
 ## Output Layout
@@ -63,7 +63,7 @@ The Microsoft WSL JSON contains two distribution groups:
 
 Modern entries include package URLs and SHA-256 hashes. These files are verified after download and can be safely skipped on later runs when the hash matches.
 
-Legacy entries are Store/Appx packages. They do not provide SHA-256 hashes in the JSON, so the script can download them but cannot verify them. The menu shows a warning before selecting legacy packages.
+Legacy entries are Store/Appx packages. They do not provide SHA-256 hashes in the JSON, so the script cannot verify the downloaded Appx/AppxBundle itself. After download, the script extracts the matching architecture package and keeps only the rootfs archive, such as `install.tar.gz`, in `dist`.
 
 ## File Naming
 
@@ -71,7 +71,8 @@ The output file name is based on `FriendlyName` from the JSON:
 
 - Spaces are replaced with underscores.
 - Invalid Windows filename characters are replaced.
-- The original source extension is preserved.
+- Modern packages preserve the original source extension.
+- Legacy Appx/AppxBundle packages are extracted and saved as rootfs archives, usually `.tar.gz`.
 - Architecture suffixes such as `_x64` or `_arm64` are not added because the script already selects the correct URL by architecture.
 
 Example:
@@ -84,10 +85,11 @@ AlmaLinux OS 8   -> AlmaLinux_OS_8.wsl
 ## Safety Notes
 
 - Modern packages are verified with SHA-256.
-- Legacy packages are not SHA-256 verified because the source JSON does not provide hashes.
+- Legacy source packages are not SHA-256 verified because the source JSON does not provide hashes.
+- Legacy Appx/AppxBundle files are temporary; the final saved file is the extracted rootfs archive.
 - If a modern package exists and passes verification, it is skipped.
 - If a modern package exists but fails verification, it is downloaded again.
-- If a legacy package exists, it may be overwritten because no hash is available.
+- If a legacy rootfs output exists, it may be overwritten because no hash is available.
 - If `Ctrl+C` is pressed during download, the active aria2 process is stopped.
 
 ## 中文说明
@@ -106,7 +108,7 @@ AlmaLinux OS 8   -> AlmaLinux_OS_8.wsl
 - 自动从 aria2 官方 GitHub Release 下载并更新 `aria2c`。
 - 自动判断系统架构，并选择对应的 x64 或 ARM64 下载地址。
 - 下载现代 WSL 包并进行 SHA-256 校验。
-- 支持旧版 Store/Appx 包，并在无法校验时给出明确提示。
+- 支持旧版 Store/Appx 包，并从中提取 rootfs 核心包。
 - 使用 aria2 原生下载进度显示。
 - 现代包如果已存在且 SHA-256 一致，会自动跳过。
 - 清理临时文件，只保留 `tmp\bin\aria2c.exe`。
@@ -130,7 +132,7 @@ AlmaLinux OS 8   -> AlmaLinux_OS_8.wsl
    - `Space`：选择或取消选择
    - `Enter`：继续
 4. 第一页选择现代 WSL 发行版。
-5. 第二页可选旧版 Store/Appx 包。
+5. 第二页可选旧版 Store/Appx 包，这些包会被提取为 rootfs 文件。
 6. 下载完成的文件会保存到 `dist`。
 
 ## 输出目录
@@ -157,7 +159,7 @@ Microsoft WSL JSON 中有两类发行版信息：
 
 现代包包含下载地址和 SHA-256，因此脚本会在下载后进行校验，并能在后续运行中根据校验结果跳过已下载文件。
 
-旧版包通常是 Store/Appx/AppxBundle 包。JSON 中没有提供 SHA-256，因此脚本可以下载，但无法进行 hash 校验。选择旧版包前，菜单会显示风险提示。
+旧版包通常是 Store/Appx/AppxBundle 包。JSON 中没有提供 SHA-256，因此脚本无法校验下载到的 Appx/AppxBundle 源文件。下载完成后，脚本会提取匹配当前架构的内层包，并只把 rootfs 核心包保存到 `dist`，例如 `install.tar.gz`。
 
 ## 文件命名
 
@@ -165,7 +167,8 @@ Microsoft WSL JSON 中有两类发行版信息：
 
 - 空格替换为下划线。
 - Windows 文件名非法字符会被替换。
-- 保留源文件原始扩展名。
+- 现代包会保留源文件原始扩展名。
+- 旧版 Appx/AppxBundle 包会被提取并保存为 rootfs 文件，通常是 `.tar.gz`。
 - 不再添加 `_x64` 或 `_arm64` 后缀，因为脚本已经根据系统架构选择了正确 URL。
 
 示例：
@@ -178,8 +181,9 @@ AlmaLinux OS 8   -> AlmaLinux_OS_8.wsl
 ## 安全说明
 
 - 现代包会进行 SHA-256 校验。
-- 旧版包因为 JSON 没有提供 SHA-256，所以无法校验。
+- 旧版源包因为 JSON 没有提供 SHA-256，所以无法校验。
+- 旧版 Appx/AppxBundle 只是临时文件，最终保存的是提取出的 rootfs 核心包。
 - 现代包存在且校验通过时，会跳过下载。
 - 现代包存在但校验失败时，会重新下载。
-- 旧版包存在时，可能会被覆盖，因为无法判断文件是否正确。
+- 旧版 rootfs 输出文件存在时，可能会被覆盖，因为无法判断文件是否正确。
 - 下载过程中按 `Ctrl+C`，脚本会停止当前 aria2 进程。

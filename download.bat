@@ -64,6 +64,9 @@ $messages = @{
     ControlsHint = 'Use Up/Down to move, Space to select, and Enter to continue.'
     SkipSection = 'Skip this section'
     LegacyWarning = 'Warning: legacy Store/Appx packages. No sha256 is available, so verification will be skipped.'
+    LegacyExtract = 'Extracting legacy rootfs package'
+    LegacyRootfsNotFound = 'No rootfs package was found in legacy package: {0}'
+    LegacyInnerPackageNotFound = 'No matching architecture package was found in bundle: {0}'
     AppTitle = 'WSL Distribution Downloader'
     SystemArch = 'System architecture: {0}'
     OutputDir = 'Output directory: {0}'
@@ -168,6 +171,15 @@ function Get-SourceExtension {
     return $fallback
 }
 
+function Get-LegacyRootfsExtension {
+    param([string]$Url)
+    $sourceExtension = Get-SourceExtension $Url
+    if ($sourceExtension -in @('.appx', '.appxbundle', '.msix', '.msixbundle')) {
+        return '.tar.gz'
+    }
+    return $sourceExtension
+}
+
 function Get-SystemArchitecture {
     $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
     switch -Regex ($arch) {
@@ -215,6 +227,141 @@ function Stop-ProjectAria2Processes {
         }
     }
     catch {
+    }
+}
+
+function Get-ZipEntries {
+    param([string]$Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    return $zip
+}
+
+function Find-RootfsEntry {
+    param($Zip)
+    $rootfsPatterns = @(
+        '(?i)(^|/)install\.tar\.gz$',
+        '(?i)(^|/)rootfs\.tar\.gz$',
+        '(?i)(^|/)install\.tar$',
+        '(?i)(^|/)rootfs\.tar$',
+        '(?i)\.tar\.gz$',
+        '(?i)\.tar\.xz$',
+        '(?i)\.tar$'
+    )
+    foreach ($pattern in $rootfsPatterns) {
+        $entry = $Zip.Entries | Where-Object { $_.FullName -match $pattern } | Sort-Object Length -Descending | Select-Object -First 1
+        if ($entry) {
+            return $entry
+        }
+    }
+    return $null
+}
+
+function Find-BundleAppxEntry {
+    param(
+        $Zip,
+        [hashtable]$Architecture
+    )
+    $patterns = if ($Architecture.Label -eq 'arm64') {
+        @('(?i)(arm64|aarch64).*\.appx$', '(?i)(arm64|aarch64).*\.msix$')
+    }
+    else {
+        @('(?i)(x64|amd64).*\.appx$', '(?i)(x64|amd64).*\.msix$')
+    }
+
+    foreach ($pattern in $patterns) {
+        $entry = $Zip.Entries | Where-Object { $_.FullName -match $pattern } | Sort-Object Length -Descending | Select-Object -First 1
+        if ($entry) {
+            return $entry
+        }
+    }
+
+    return $Zip.Entries | Where-Object { $_.FullName -match '(?i)\.(appx|msix)$' -and $_.FullName -notmatch '(?i)scale-|neutral' } | Sort-Object Length -Descending | Select-Object -First 1
+}
+
+function Get-RootfsExtensionFromEntryName {
+    param([string]$Name)
+    $lower = $Name.ToLowerInvariant()
+    foreach ($ext in @('.tar.gz', '.tar.xz', '.tar')) {
+        if ($lower.EndsWith($ext)) {
+            return $ext
+        }
+    }
+    return '.tar.gz'
+}
+
+function Remove-KnownPackageExtension {
+    param([string]$Path)
+    $knownExtensions = @('.tar.gz', '.tar.xz', '.appxbundle', '.msixbundle', '.appx', '.msix', '.wsl', '.zip', '.tar')
+    foreach ($extension in $knownExtensions) {
+        if ($Path.ToLowerInvariant().EndsWith($extension)) {
+            return $Path.Substring(0, $Path.Length - $extension.Length)
+        }
+    }
+    return [System.IO.Path]::Combine(
+        [System.IO.Path]::GetDirectoryName($Path),
+        [System.IO.Path]::GetFileNameWithoutExtension($Path)
+    )
+}
+
+function Export-LegacyRootfs {
+    param(
+        [string]$PackagePath,
+        [string]$OutputPath,
+        [hashtable]$Architecture
+    )
+
+    $packageExtension = [System.IO.Path]::GetExtension($PackagePath).ToLowerInvariant()
+    $workDir = Join-Path $tmpDir ('legacy-extract-' + [System.Guid]::NewGuid().ToString('N'))
+    Ensure-Directory $workDir
+
+    try {
+        $rootfsEntry = $null
+        $rootfsZip = $null
+
+        if ($packageExtension -in @('.appxbundle', '.msixbundle')) {
+            $bundleZip = Get-ZipEntries -Path $PackagePath
+            try {
+                $innerEntry = Find-BundleAppxEntry -Zip $bundleZip -Architecture $Architecture
+                if (-not $innerEntry) {
+                    throw (T 'LegacyInnerPackageNotFound' ([System.IO.Path]::GetFileName($PackagePath)))
+                }
+                $innerPath = Join-Path $workDir ([System.IO.Path]::GetFileName($innerEntry.FullName))
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($innerEntry, $innerPath, $true)
+            }
+            finally {
+                $bundleZip.Dispose()
+            }
+
+            $rootfsZip = Get-ZipEntries -Path $innerPath
+        }
+        else {
+            $rootfsZip = Get-ZipEntries -Path $PackagePath
+        }
+
+        try {
+            $rootfsEntry = Find-RootfsEntry -Zip $rootfsZip
+            if (-not $rootfsEntry) {
+                throw (T 'LegacyRootfsNotFound' ([System.IO.Path]::GetFileName($PackagePath)))
+            }
+
+            $rootfsExtension = Get-RootfsExtensionFromEntryName $rootfsEntry.FullName
+            $finalOutputPath = (Remove-KnownPackageExtension $OutputPath) + $rootfsExtension
+
+            if (Test-Path -LiteralPath $finalOutputPath) {
+                Remove-Item -LiteralPath $finalOutputPath -Force
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($rootfsEntry, $finalOutputPath, $true)
+            return $finalOutputPath
+        }
+        finally {
+            if ($rootfsZip) {
+                $rootfsZip.Dispose()
+            }
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -417,7 +564,7 @@ function Get-LegacyDistributionList {
         }
 
         $safeName = Get-SafeFileName ([string]$entry.FriendlyName)
-        $extension = Get-SourceExtension $url
+        $extension = Get-LegacyRootfsExtension $url
         $targetName = '{0}{1}' -f $safeName, $extension
 
         $items.Add([pscustomobject]@{
@@ -427,6 +574,7 @@ function Get-LegacyDistributionList {
             Name = [string]$entry.Name
             FriendlyName = [string]$entry.FriendlyName
             Url = $url
+            SourceExtension = Get-SourceExtension $url
             Sha256 = ''
             TargetName = $targetName
             RequiresHash = $false
@@ -633,7 +781,11 @@ try {
         }
 
         Write-Step (T 'StartDownload')
-        $downloadedPath = Invoke-Download -Url $selected.Url -Directory $downloadDir -FileName $selected.TargetName -Description $selected.FriendlyName
+        $downloadFileName = $selected.TargetName
+        if (-not $selected.RequiresHash) {
+            $downloadFileName = (Remove-KnownPackageExtension $selected.TargetName) + $selected.SourceExtension
+        }
+        $downloadedPath = Invoke-Download -Url $selected.Url -Directory $downloadDir -FileName $downloadFileName -Description $selected.FriendlyName
 
         if ($selected.RequiresHash) {
             Write-Step (T 'VerifyHash')
@@ -645,6 +797,12 @@ try {
         else {
             Write-Step (T 'VerifyHash')
             Write-Host (T 'SkipHash') -ForegroundColor Yellow
+            Write-Step (T 'LegacyExtract')
+            $extractedPath = Export-LegacyRootfs -PackagePath $downloadedPath -OutputPath $targetPath -Architecture $architecture
+            Remove-Item -LiteralPath $downloadedPath -Force -ErrorAction SilentlyContinue
+            Write-Host (T 'Saved' $extractedPath) -ForegroundColor Green
+            $savedCount++
+            continue
         }
 
         Move-Item -LiteralPath $downloadedPath -Destination $targetPath -Force
